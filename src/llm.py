@@ -69,25 +69,39 @@ class RunConfig:
 def build_question(feature: str, outcome: str) -> str:
     """Build the natural-language claim that the model should assess."""
 
-    return f"How important is {feature} for {outcome}?"
+    return (
+        f"In a survival analysis setting, how important is {feature} as a prognostic or diagnostic factor for {outcome}, and why?"
+    )
 
 
 def build_prompt(feature: str, outcome: str) -> str:
     """Build an instruction prompt that requests JSON-only output."""
 
+    question = build_question(feature, outcome)
+
     return (
-        "You are a biomedical assistant.\n"
-        "Return exactly one valid JSON object and no other text.\n"
-        "Use only the current feature and current outcome below when forming the answer.\n"
-        "Do not copy or reuse text from prior examples.\n"
-        "The JSON object must have exactly these keys:\n"
-        f'- "importance_probability": a number between 0 and 1 representing how strongly current biomedical knowledge supports the claim that "{feature}" is important for "{outcome}". Use 0 for no meaningful support and 1 for very strong support\n'
-        f'- "reasoning": 1-2 sentences that explicitly mention "{feature}" and explain why it is or is not important for "{outcome}"\n'
-        "If uncertain, still provide your best probability estimate.\n"
-        f"Feature: {feature}\n"
-        f"Outcome: {outcome}\n"
-        f"Question: {build_question(feature, outcome)}\n"
-        "JSON:"
+        "You are a biomedical expert.\n"
+        "Task:\n"
+        "Answer the biomedical question below and return the answer as JSON.\n"
+        "You must answer the question itself, not describe the prompt.\n"
+        "\n"
+        "Question:\n"
+        f"{question}\n"
+        "\n"
+        "Current inputs:\n"
+        f'- feature: "{feature}"\n'
+        f'- outcome: "{outcome}"\n'
+        "\n"
+        "Output requirements:\n"
+        "1. Return exactly one valid JSON object.\n"
+        '2. The JSON object must contain exactly these keys: "reasoning" and "importance_probability".\n'
+        '3. First determine the reasoning, then set "importance_probability" so it is consistent with that reasoning.\n'
+        f'4. "reasoning" must be 1 to 2 sentences, must explicitly mention "{feature}", and must answer this question: "{question}".\n'
+        f'5. "importance_probability" must be a single number representing how strongly current biomedical knowledge supports this question: "{question}". Use 0 for no meaningful support and 1 for very strong support. If the reasoning is that there is no meaningful literature or evidence on this question, return -1.\n'
+        "6. Base the reasoning on biomedical findings, clinical relevance, or prognostic/diagnostic relevance.\n"
+        "7. Do not justify importance by saying the feature is common in articles, frequently mentioned, or widely studied.\n"
+        "\n"
+        "JSON Output:"
     )
 
 
@@ -110,12 +124,14 @@ def strip_response_prefix(text: str) -> str:
 
 
 def normalize_probability(value) -> Optional[float]:
-    """Parse a numeric score and clamp it to the [0, 1] probability range."""
+    """Parse a numeric score and clamp it to the allowed range, with -1 as a sentinel."""
 
     try:
         prob = float(str(value).replace("%", "").strip())
     except (TypeError, ValueError):
         return None
+    if prob == -1.0:
+        return -1.0
     if prob > 1.0:
         prob /= 100.0
     return max(0.0, min(1.0, prob))
