@@ -12,7 +12,6 @@
 set -euo pipefail
 
 module purge
-[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
 
 REPO_DIR="/scratch/$USER/KASurv"
 SCRATCH_ROOT="/scratch/$USER"
