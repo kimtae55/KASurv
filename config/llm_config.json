@@ -16,6 +16,7 @@
   "model_ids": {
     "pmc_llama": "axiong/PMC_LLaMA_13B"
   },
+  "max_length": 2048,
   "max_new_tokens": 256,
   "output_json": "results/adni_responses.json"
 }

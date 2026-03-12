@@ -37,6 +37,7 @@ class LoadedModel:
     tokenizer: object
     model: object
     device: str
+    max_length: int
 
 
 @dataclass
@@ -62,6 +63,7 @@ class RunConfig:
     outcome: str
     models: List[str]
     model_ids: Dict[str, str]
+    max_length: Optional[int]
     max_new_tokens: int
     output_json: str
 
@@ -97,7 +99,7 @@ def build_prompt(feature: str, outcome: str) -> str:
         "1. Return exactly one valid JSON object.\n"
         '2. The JSON object must contain exactly these keys: "answer" and "confidence".\n'
         '3. First determine whether the answer is yes, no, or unknown, then set "confidence" so it is consistent with that answer.\n'
-        f'4. "answer" must be 1 to 2 sentences and must follow this style: "Yes, {feature} is known to predict {outcome}, because ...", "No, {feature} is not known to predict {outcome}, because ...", or "Unknown, current evidence is insufficient to determine whether {feature} predicts {outcome}, because ...". Do not repeat the question verbatim.\n'
+        f'4. "answer" must be exactly 1 sentence and must follow one of these styles: "Yes, {feature} is associated with {outcome}, because {{scientific reasoning}}.", "No, {feature} is not associated with {outcome}, because {{scientific reasoning}}.", or "Unknown, current evidence is insufficient to determine whether {feature} is associated with {outcome}, because {{scientific reasoning}}." Do not repeat the question verbatim.\n'
         '5. "confidence" must be a single number in [-1, 1] representing the answer on a signed confidence scale. Use values near 1 if the answer is yes, values near -1 if the answer is no, and values near 0 if the answer is unknown or the evidence is unclear.\n'
         "6. Answer and confidence must be correctly reflect true facts from biomedical findings, clinical relevance, or prognostic/diagnostic relevance.\n"
         "7. Do not justify importance by saying the feature is common in articles, frequently mentioned, or widely studied.\n"
@@ -171,12 +173,13 @@ def load_config(config_path: Path) -> RunConfig:
         outcome=str(payload["outcome"]).strip(),
         models=[str(x).strip() for x in payload["models"] if str(x).strip()],
         model_ids={str(k).strip(): str(v).strip() for k, v in payload["model_ids"].items()},
+        max_length=(int(payload["max_length"]) if payload.get("max_length") is not None else None),
         max_new_tokens=int(payload.get("max_new_tokens", 256)),
         output_json=str(payload.get("output_json", "results/llm_apoe4.json")).strip(),
     )
 
 
-def load_hf_causal_lm(model_key: str, model_id: str) -> LoadedModel:
+def load_hf_causal_lm(model_key: str, model_id: str, requested_max_length: Optional[int] = None) -> LoadedModel:
     """Load a Hugging Face causal LM once so it can be reused across features."""
 
     import torch
@@ -194,6 +197,14 @@ def load_hf_causal_lm(model_key: str, model_id: str) -> LoadedModel:
     model = transformers.AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
     model = model.to(device)
     model.eval()
+    model_max_length = int(
+        getattr(model.config, "max_position_embeddings", 0)
+        or getattr(model.config, "n_positions", 0)
+        or getattr(tokenizer, "model_max_length", 0)
+        or 2048
+    )
+    max_length = requested_max_length if requested_max_length is not None else model_max_length
+    tokenizer.model_max_length = max_length
     return LoadedModel(
         model_key=model_key,
         runner="hf_causal_lm",
@@ -201,6 +212,7 @@ def load_hf_causal_lm(model_key: str, model_id: str) -> LoadedModel:
         tokenizer=tokenizer,
         model=model,
         device=device,
+        max_length=max_length,
     )
 
 
@@ -210,7 +222,7 @@ def infer_hf_causal_lm(loaded_model: LoadedModel, dataset: str, feature: str, ou
     import torch
 
     prompt = build_prompt(feature, outcome)
-    model_inputs = loaded_model.tokenizer([prompt], return_tensors="pt", padding=True)
+    model_inputs = loaded_model.tokenizer([prompt], return_tensors="pt", padding=True, max_length=loaded_model.max_length)
     model_inputs = {k: v.to(loaded_model.device) for k, v in model_inputs.items()}
 
     with torch.inference_mode():
@@ -249,7 +261,7 @@ def build_model_specs(config: RunConfig) -> Dict[str, ModelSpec]:
     }
 
 
-def available_loaders() -> Dict[str, Callable[[str, str], LoadedModel]]:
+def available_loaders() -> Dict[str, Callable[[str, str, Optional[int]], LoadedModel]]:
     """Map runner names to model-loading functions."""
 
     return {
@@ -291,7 +303,7 @@ def load_models(config: RunConfig, model_specs: Dict[str, ModelSpec]) -> tuple[D
 
         try:
             loader = loaders[spec.runner]
-            loaded_models[model_key] = loader(spec.key, spec.model_id)
+            loaded_models[model_key] = loader(spec.key, spec.model_id, config.max_length)
         except Exception as exc:
             load_errors.append(
                 ModelResult(
