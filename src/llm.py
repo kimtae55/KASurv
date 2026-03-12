@@ -354,7 +354,6 @@ def main() -> None:
     if args.list_models:
         for key, spec in model_specs.items():
             print(f"{key}: runner={spec.runner} model_id={spec.model_id}")
-        return
 
     loaded_models, load_errors = load_models(config, model_specs)
     results = run_models(config, loaded_models, load_errors)
