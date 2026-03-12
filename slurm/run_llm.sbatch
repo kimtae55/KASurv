@@ -23,6 +23,8 @@ set -euo pipefail
 source /ext3/env.sh
 export PYTHONUSERBASE=${SCRATCH_ROOT}/python_userbase
 export PATH=${SCRATCH_ROOT}/python_userbase/bin:\$PATH
+export PYTHONPATH=\$(python -m site --user-site):\${PYTHONPATH:-}
+export MPLCONFIGDIR=/scratch/$USER/matplotlib
 export HF_HOME=${SCRATCH_ROOT}/hf_cache
 export VLLM_CACHE_ROOT=${SCRATCH_ROOT}/vllm_cache
 export TOKENIZERS_PARALLELISM=false
