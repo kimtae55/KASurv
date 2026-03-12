@@ -138,7 +138,7 @@ def run_hf_causal_lm(question: str, model_key: str, model_id: str, max_new_token
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_kwargs = {"low_cpu_mem_usage": True}
         if device == "cuda":
-            model_kwargs["torch_dtype"] = torch.float16
+            model_kwargs["dtype"] = torch.float16
 
         model = transformers.AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
         model = model.to(device)
