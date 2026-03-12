@@ -15,8 +15,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
-DEFAULT_QUESTION = "How important is APOE4 status on Alzheimer's disease diagnosis?"
-DEFAULT_PMC_LLAMA_MODEL_ID = "axiong/PMC_LLaMA_13B"
+DEFAULT_CONFIG_PATH = Path("config/llm_config.json")
 
 
 @dataclass(frozen=True)
@@ -29,30 +28,66 @@ class ModelSpec:
 
 
 @dataclass
+class LoadedModel:
+    """Loaded model assets reused across multiple feature queries."""
+
+    model_key: str
+    runner: str
+    model_id: str
+    tokenizer: object
+    model: object
+    device: str
+
+
+@dataclass
 class ModelResult:
     """Normalized result payload returned for each queried model."""
 
+    dataset: str
     model_key: str
+    feature: str
+    outcome: str
     importance_probability: Optional[float]
-    num_sources: int
     reasoning: str
     raw_response: str
     error: Optional[str] = None
 
 
-def build_prompt(question: str) -> str:
+@dataclass(frozen=True)
+class RunConfig:
+    """Runtime configuration loaded from JSON."""
+
+    dataset: str
+    features: List[str]
+    outcome: str
+    models: List[str]
+    model_ids: Dict[str, str]
+    max_new_tokens: int
+    output_json: str
+
+
+def build_question(feature: str, outcome: str) -> str:
+    """Build the natural-language claim that the model should assess."""
+
+    return f"How important is {feature} for {outcome}?"
+
+
+def build_prompt(feature: str, outcome: str) -> str:
     """Build an instruction prompt that requests JSON-only output."""
 
+    question = build_question(feature, outcome)
+
     return (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n"
-        "You are a biomedical assistant. Answer the question and return JSON only with keys "
-        "`importance_probability`, `num_sources`, and `reasoning`. The probability must be between 0 and 1, "
-        "`num_sources` must be an integer count of supporting sources/documents, and the reasoning must be exactly "
-        "one sentence.\n\n"
-        f"### Input:\n{question}\n\n"
-        "### Response:"
+        "You are a biomedical assistant.\n"
+        "Return exactly one valid JSON object and no other text.\n"
+        "The JSON object must have exactly these keys:\n"
+        f'- "importance_probability": a number between 0 and 1 representing how strongly current biomedical knowledge supports the claim that "{feature}" is important for "{outcome}". Use 0 for no meaningful support and 1 for very strong support\n'
+        '- "reasoning": one sentence only\n'
+        "If uncertain, still provide your best probability estimate.\n"
+        "Example format:\n"
+        "{\"importance_probability\": 0.84, \"reasoning\": \"APOE4 is a major genetic risk factor for late-onset Alzheimer's disease.\"}\n"
+        f"Question: {question}\n"
+        "JSON:"
     )
 
 
@@ -86,17 +121,8 @@ def normalize_probability(value) -> Optional[float]:
     return max(0.0, min(1.0, prob))
 
 
-def normalize_int(value) -> Optional[int]:
-    """Parse an integer field and reject non-integer values."""
-
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_llm_json(text: str) -> tuple[Optional[float], int, str]:
-    """Extract a probability, source count, and one-sentence rationale from model output."""
+def parse_llm_json(text: str) -> tuple[Optional[float], str]:
+    """Extract a probability and one-sentence rationale from model output."""
 
     clean_text = strip_response_prefix(text)
     match = re.search(r"(\{.*?\})", clean_text, flags=re.DOTALL)
@@ -105,115 +131,143 @@ def parse_llm_json(text: str) -> tuple[Optional[float], int, str]:
             payload = json.loads(match.group(1))
             return (
                 normalize_probability(payload.get("importance_probability")),
-                normalize_int(payload.get("num_sources")) or 0,
                 first_sentence(str(payload.get("reasoning", ""))),
             )
         except json.JSONDecodeError:
             pass
 
-    return None, 0, first_sentence(clean_text)
+    prob_match = re.search(
+        r'"importance_probability"\s*:\s*([0-9]*\.?[0-9]+)|\bprobability\b\s*[:=]?\s*([0-9]*\.?[0-9]+)',
+        clean_text,
+        flags=re.IGNORECASE,
+    )
+    prob = None
+    if prob_match:
+        prob = normalize_probability(prob_match.group(1) or prob_match.group(2))
+    return prob, first_sentence(clean_text)
 
 
-def run_hf_causal_lm(question: str, model_key: str, model_id: str, max_new_tokens: int) -> ModelResult:
-    """Run a Hugging Face causal LM and normalize the generated answer."""
+def load_config(config_path: Path) -> RunConfig:
+    """Load and validate the JSON config used for the current run."""
 
-    try:
-        import torch
-        import transformers
-    except ImportError as exc:
-        return ModelResult(
-            model_key=model_key,
-            importance_probability=None,
-            num_sources=0,
-            reasoning="",
-            raw_response="",
-            error=f"missing package: {exc}",
+    payload = json.loads(config_path.read_text())
+    return RunConfig(
+        dataset=str(payload["dataset"]).strip(),
+        features=[str(x).strip() for x in payload["features"] if str(x).strip()],
+        outcome=str(payload["outcome"]).strip(),
+        models=[str(x).strip() for x in payload["models"] if str(x).strip()],
+        model_ids={str(k).strip(): str(v).strip() for k, v in payload["model_ids"].items()},
+        max_new_tokens=int(payload.get("max_new_tokens", 256)),
+        output_json=str(payload.get("output_json", "results/llm_apoe4.json")).strip(),
+    )
+
+
+def load_hf_causal_lm(model_key: str, model_id: str) -> LoadedModel:
+    """Load a Hugging Face causal LM once so it can be reused across features."""
+
+    import torch
+    import transformers
+
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_id, use_fast=False)
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_kwargs = {"low_cpu_mem_usage": True}
+    if device == "cuda":
+        model_kwargs["dtype"] = torch.float16
+
+    model = transformers.AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+    model = model.to(device)
+    model.eval()
+    return LoadedModel(
+        model_key=model_key,
+        runner="hf_causal_lm",
+        model_id=model_id,
+        tokenizer=tokenizer,
+        model=model,
+        device=device,
+    )
+
+
+def infer_hf_causal_lm(loaded_model: LoadedModel, dataset: str, feature: str, outcome: str, max_new_tokens: int) -> ModelResult:
+    """Run one feature/outcome query against a preloaded Hugging Face causal LM."""
+
+    import torch
+
+    prompt = build_prompt(feature, outcome)
+    model_inputs = loaded_model.tokenizer([prompt], return_tensors="pt", padding=True)
+    model_inputs = {k: v.to(loaded_model.device) for k, v in model_inputs.items()}
+
+    with torch.inference_mode():
+        generated = loaded_model.model.generate(
+            model_inputs["input_ids"],
+            attention_mask=model_inputs.get("attention_mask"),
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=loaded_model.tokenizer.pad_token_id,
         )
 
-    try:
-        tokenizer = transformers.AutoTokenizer.from_pretrained(model_id, use_fast=False)
-        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model_kwargs = {"low_cpu_mem_usage": True}
-        if device == "cuda":
-            model_kwargs["dtype"] = torch.float16
-
-        model = transformers.AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
-        model = model.to(device)
-        model.eval()
-
-        prompt = build_prompt(question)
-        model_inputs = tokenizer([prompt], return_tensors="pt", padding=True)
-        model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
-
-        with torch.inference_mode():
-            generated = model.generate(
-                model_inputs["input_ids"],
-                attention_mask=model_inputs.get("attention_mask"),
-                max_new_tokens=max_new_tokens,
-                top_k=50,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-
-        # Decoder-only generation returns prompt + continuation, so strip the prompt tokens first.
-        prompt_len = model_inputs["input_ids"].shape[1]
-        generated_only = generated[:, prompt_len:]
-        output_text = tokenizer.batch_decode(generated_only, skip_special_tokens=True)[0]
-        score, num_sources, reasoning = parse_llm_json(output_text)
-        return ModelResult(
-            model_key=model_key,
-            importance_probability=score,
-            num_sources=num_sources,
-            reasoning=reasoning or "No reasoning returned.",
-            raw_response=output_text,
-        )
-    except Exception as exc:
-        return ModelResult(
-            model_key=model_key,
-            importance_probability=None,
-            num_sources=0,
-            reasoning="",
-            raw_response="",
-            error=str(exc),
-        )
+    prompt_len = model_inputs["input_ids"].shape[1]
+    generated_only = generated[:, prompt_len:]
+    output_text = loaded_model.tokenizer.batch_decode(generated_only, skip_special_tokens=True)[0]
+    score, reasoning = parse_llm_json(output_text)
+    return ModelResult(
+        dataset=dataset,
+        model_key=loaded_model.model_key,
+        feature=feature,
+        outcome=outcome,
+        importance_probability=score,
+        reasoning=reasoning or "No reasoning returned.",
+        raw_response=output_text,
+    )
 
 
-def default_model_specs(pmc_llama_model_id: str) -> Dict[str, ModelSpec]:
+def build_model_specs(config: RunConfig) -> Dict[str, ModelSpec]:
     """Return the supported model registry for this run."""
 
     return {
         "pmc_llama": ModelSpec(
             key="pmc_llama",
-            model_id=pmc_llama_model_id,
+            model_id=config.model_ids["pmc_llama"],
             runner="hf_causal_lm",
         ),
     }
 
 
-def available_runners() -> Dict[str, Callable[[str, str, str, int], ModelResult]]:
-    """Map runner names to implementation functions."""
+def available_loaders() -> Dict[str, Callable[[str, str], LoadedModel]]:
+    """Map runner names to model-loading functions."""
 
     return {
-        "hf_causal_lm": run_hf_causal_lm,
+        "hf_causal_lm": load_hf_causal_lm,
     }
 
 
-def run_models(question: str, requested: List[str], model_specs: Dict[str, ModelSpec], max_new_tokens: int) -> List[ModelResult]:
-    """Run all requested models using the configured registry."""
+def available_inferencers() -> Dict[str, Callable[[LoadedModel, str, str, str, int], ModelResult]]:
+    """Map runner names to inference functions over preloaded models."""
 
-    runners = available_runners()
-    results: List[ModelResult] = []
+    return {
+        "hf_causal_lm": infer_hf_causal_lm,
+    }
 
-    for model_key in requested:
+
+def load_models(config: RunConfig, model_specs: Dict[str, ModelSpec]) -> tuple[Dict[str, LoadedModel], List[ModelResult]]:
+    """Load each requested model once and collect load-time errors as results."""
+
+    loaders = available_loaders()
+    loaded_models: Dict[str, LoadedModel] = {}
+    load_errors: List[ModelResult] = []
+
+    for model_key in config.models:
         spec = model_specs.get(model_key)
         if spec is None:
-            results.append(
+            load_errors.append(
                 ModelResult(
+                    dataset=config.dataset,
                     model_key=model_key,
+                    feature="",
+                    outcome=config.outcome,
                     importance_probability=None,
-                    num_sources=0,
                     reasoning="",
                     raw_response="",
                     error=f"unsupported model key: {model_key}",
@@ -221,25 +275,57 @@ def run_models(question: str, requested: List[str], model_specs: Dict[str, Model
             )
             continue
 
-        runner = runners[spec.runner]
-        results.append(runner(question, spec.key, spec.model_id, max_new_tokens))
+        try:
+            loader = loaders[spec.runner]
+            loaded_models[model_key] = loader(spec.key, spec.model_id)
+        except Exception as exc:
+            load_errors.append(
+                ModelResult(
+                    dataset=config.dataset,
+                    model_key=model_key,
+                    feature="",
+                    outcome=config.outcome,
+                    importance_probability=None,
+                    reasoning="",
+                    raw_response="",
+                    error=str(exc),
+                )
+            )
+
+    return loaded_models, load_errors
+
+
+def run_models(config: RunConfig, loaded_models: Dict[str, LoadedModel], load_errors: List[ModelResult]) -> List[ModelResult]:
+    """Run all requested models for each feature using preloaded model assets."""
+
+    inferencers = available_inferencers()
+    results: List[ModelResult] = []
+    results.extend(load_errors)
+
+    for feature in config.features:
+        for model_key in config.models:
+            loaded_model = loaded_models.get(model_key)
+            if loaded_model is None:
+                continue
+
+            try:
+                inferencer = inferencers[loaded_model.runner]
+                results.append(inferencer(loaded_model, config.dataset, feature, config.outcome, config.max_new_tokens))
+            except Exception as exc:
+                results.append(
+                    ModelResult(
+                        dataset=config.dataset,
+                        model_key=model_key,
+                        feature=feature,
+                        outcome=config.outcome,
+                        importance_probability=None,
+                        reasoning="",
+                        raw_response="",
+                        error=str(exc),
+                    )
+                )
 
     return results
-
-
-def print_results(results: List[ModelResult]) -> None:
-    """Print a compact CLI summary for each model result."""
-
-    for result in results:
-        print(f"model_key={result.model_key}")
-        if result.error:
-            print(f"error={result.error}")
-        else:
-            score = "null" if result.importance_probability is None else f"{result.importance_probability:.4f}"
-            print(f"importance_probability={score}")
-            print(f"num_sources={result.num_sources}")
-            print(f"reasoning={result.reasoning}")
-        print("")
 
 
 def save_results(results: List[ModelResult], output_json: Path) -> None:
@@ -253,11 +339,7 @@ def build_argparser() -> argparse.ArgumentParser:
     """Define the CLI for question, model selection, and output settings."""
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--question", type=str, default=DEFAULT_QUESTION)
-    parser.add_argument("--models", type=str, default="pmc_llama")
-    parser.add_argument("--pmc-llama-model-id", type=str, default=DEFAULT_PMC_LLAMA_MODEL_ID)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument("--output-json", type=str, default="results/llm_apoe4.json")
+    parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--list-models", action="store_true")
     return parser
 
@@ -266,17 +348,17 @@ def main() -> None:
     """Parse CLI args, run the requested models, then print and save results."""
 
     args = build_argparser().parse_args()
-    model_specs = default_model_specs(args.pmc_llama_model_id)
+    config = load_config(Path(args.config))
+    model_specs = build_model_specs(config)
 
     if args.list_models:
         for key, spec in model_specs.items():
             print(f"{key}: runner={spec.runner} model_id={spec.model_id}")
         return
 
-    requested = [x.strip() for x in args.models.split(",") if x.strip()]
-    results = run_models(args.question, requested, model_specs, args.max_new_tokens)
-    print_results(results)
-    save_results(results, Path(args.output_json))
+    loaded_models, load_errors = load_models(config, model_specs)
+    results = run_models(config, loaded_models, load_errors)
+    save_results(results, Path(config.output_json))
 
 
 if __name__ == "__main__":

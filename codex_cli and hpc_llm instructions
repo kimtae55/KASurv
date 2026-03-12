@@ -20,9 +20,11 @@ There will be two types of task:
 
 
 # Hugginface LLM usage on HPC  https://services.rt.nyu.edu/docs/hpc/ml_ai_hpc/LLM%20inference/run_hf_model/
+# Finetuning: https://services.rt.nyu.edu/docs/hpc/ml_ai_hpc/llm_fine_tuning/
 echo "export HF_HOME=/scratch/\$USER/hf_cache" >> ~/.bashrc
 echo "export VLLM_CACHE_ROOT=/scratch/\$USER/vllm_cache" >> ~/.bashrc
 echo "export PYTHONUSERBASE=/scratch/\$USER/python_userbase" >> ~/.bashrc
 singularity exec --nv --fakeroot   --overlay /scratch/tk2737/singularity/videomae_and_diffusion/overlay-50G-10M.ext3:rw   /share/apps/images/cuda11.8.86-cudnn8.7-devel-ubuntu22.04.2.sif   /bin/bash
 source /ext3/env.sh
 # finally, you can do pip install without exceeding file quota in $HOME. 
+# look at run_llm.sbatch to see the exact settings. 

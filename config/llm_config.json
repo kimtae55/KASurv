@@ -1,0 +1,21 @@
+{
+  "dataset": "ADNI",
+  "features": [
+    "APOE4 status",
+    "age",
+    "sex",
+    "Average FDG-PET of angular, temporal, and posterior cingulate",
+    "Average PIB SUVR of frontal cortex, anterior cingulate, precuneus cortex, and parietal cortex",
+    "florbetapir mean of whole cerebellum",
+    "CSF TAU"
+  ],
+  "outcome": "Alzheimer's disease diagnosis",
+  "models": [
+    "pmc_llama"
+  ],
+  "model_ids": {
+    "pmc_llama": "axiong/PMC_LLaMA_13B"
+  },
+  "max_new_tokens": 256,
+  "output_json": "results/llm_apoe4.json"
+}
