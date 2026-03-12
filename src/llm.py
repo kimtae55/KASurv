@@ -75,18 +75,18 @@ def build_question(feature: str, outcome: str) -> str:
 def build_prompt(feature: str, outcome: str) -> str:
     """Build an instruction prompt that requests JSON-only output."""
 
-    question = build_question(feature, outcome)
-
     return (
         "You are a biomedical assistant.\n"
         "Return exactly one valid JSON object and no other text.\n"
+        "Use only the current feature and current outcome below when forming the answer.\n"
+        "Do not copy or reuse text from prior examples.\n"
         "The JSON object must have exactly these keys:\n"
         f'- "importance_probability": a number between 0 and 1 representing how strongly current biomedical knowledge supports the claim that "{feature}" is important for "{outcome}". Use 0 for no meaningful support and 1 for very strong support\n'
-        '- "reasoning": one sentence only\n'
+        f'- "reasoning": 1-2 sentences that explicitly mention "{feature}" and explain why it is or is not important for "{outcome}"\n'
         "If uncertain, still provide your best probability estimate.\n"
-        "Example format:\n"
-        "{\"importance_probability\": 0.84, \"reasoning\": \"APOE4 is a major genetic risk factor for late-onset Alzheimer's disease.\"}\n"
-        f"Question: {question}\n"
+        f"Feature: {feature}\n"
+        f"Outcome: {outcome}\n"
+        f"Question: {build_question(feature, outcome)}\n"
         "JSON:"
     )
 
