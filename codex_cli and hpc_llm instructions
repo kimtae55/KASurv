@@ -1,0 +1,28 @@
+# https://developers.openai.com/codex/cli
+# https://github.com/openai/openai-agents-python --> if you want to do agentic ai
+# install nvm at https://github.com/nvm-sh/nvm?tab=readme-ov-file#install--update-script
+
+source ~/.nvm/nvm.sh
+nvm install --lts 
+npm --versionnpm i -g @openai/codex
+
+# run codex
+codex
+# to use the same session when running multiple cli
+codex resume --last 
+
+# Assign roles to agent
+You are a principal software engineer. You are expert in deep learning, diffusion models, and training/testing of models. 
+There will be two types of task: 
+1) Modify code based on instructions given by me (commander)  
+2) Test the code on 2 epochs (enabled by quicktest option in argparse)
+3) Answering relevant technical questions  
+
+
+# Hugginface LLM usage on HPC  https://services.rt.nyu.edu/docs/hpc/ml_ai_hpc/LLM%20inference/run_hf_model/
+echo "export HF_HOME=/scratch/\$USER/hf_cache" >> ~/.bashrc
+echo "export VLLM_CACHE_ROOT=/scratch/\$USER/vllm_cache" >> ~/.bashrc
+echo "export PYTHONUSERBASE=/scratch/\$USER/python_userbase" >> ~/.bashrc
+singularity exec --nv --fakeroot   --overlay /scratch/tk2737/singularity/videomae_and_diffusion/overlay-50G-10M.ext3:rw   /share/apps/images/cuda11.8.86-cudnn8.7-devel-ubuntu22.04.2.sif   /bin/bash
+source /ext3/env.sh
+# finally, you can do pip install without exceeding file quota in $HOME. 
