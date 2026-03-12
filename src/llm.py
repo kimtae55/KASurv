@@ -50,7 +50,6 @@ class ModelResult:
     outcome: str
     confidence: Optional[float]
     answer: str
-    raw_response: str
     error: Optional[str] = None
 
 
@@ -152,15 +151,23 @@ def parse_llm_json(text: str) -> tuple[Optional[float], str]:
         except json.JSONDecodeError:
             pass
 
+    answer_match = re.search(
+        r'"answer"\s*:\s*"((?:\\.|[^"\\])*)"',
+        clean_text,
+        flags=re.DOTALL,
+    )
     score_match = re.search(
         r'"confidence"\s*:\s*(-?[0-9]*\.?[0-9]+)|\bconfidence\b\s*[:=]?\s*(-?[0-9]*\.?[0-9]+)',
         clean_text,
         flags=re.IGNORECASE,
     )
+    answer = ""
+    if answer_match:
+        answer = normalize_answer(bytes(answer_match.group(1), "utf-8").decode("unicode_escape"))
     score = None
     if score_match:
         score = normalize_confidence(score_match.group(1) or score_match.group(2))
-    return score, normalize_answer(clean_text)
+    return score, (answer or normalize_answer(clean_text))
 
 
 def load_config(config_path: Path) -> RunConfig:
@@ -222,7 +229,13 @@ def infer_hf_causal_lm(loaded_model: LoadedModel, dataset: str, feature: str, ou
     import torch
 
     prompt = build_prompt(feature, outcome)
-    model_inputs = loaded_model.tokenizer([prompt], return_tensors="pt", padding=True, max_length=loaded_model.max_length)
+    model_inputs = loaded_model.tokenizer([prompt], return_tensors="pt")
+    prompt_tokens = int(model_inputs["input_ids"].shape[1])
+    if prompt_tokens > loaded_model.max_length:
+        raise ValueError(
+            f"Prompt token length {prompt_tokens} exceeds configured/model max_length {loaded_model.max_length}. "
+            "Shorten the prompt or increase max_length in config if the model supports it."
+        )
     model_inputs = {k: v.to(loaded_model.device) for k, v in model_inputs.items()}
 
     with torch.inference_mode():
@@ -245,7 +258,6 @@ def infer_hf_causal_lm(loaded_model: LoadedModel, dataset: str, feature: str, ou
         outcome=outcome,
         confidence=score,
         answer=answer or "No answer returned.",
-        raw_response=output_text,
     )
 
 
@@ -295,7 +307,6 @@ def load_models(config: RunConfig, model_specs: Dict[str, ModelSpec]) -> tuple[D
                     outcome=config.outcome,
                     confidence=None,
                     answer="",
-                    raw_response="",
                     error=f"unsupported model key: {model_key}",
                 )
             )
@@ -313,7 +324,6 @@ def load_models(config: RunConfig, model_specs: Dict[str, ModelSpec]) -> tuple[D
                     outcome=config.outcome,
                     confidence=None,
                     answer="",
-                    raw_response="",
                     error=str(exc),
                 )
             )
@@ -346,7 +356,6 @@ def run_models(config: RunConfig, loaded_models: Dict[str, LoadedModel], load_er
                         outcome=config.outcome,
                         confidence=None,
                         answer="",
-                        raw_response="",
                         error=str(exc),
                     )
                 )
