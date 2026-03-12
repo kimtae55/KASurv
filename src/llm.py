@@ -347,7 +347,7 @@ def build_argparser() -> argparse.ArgumentParser:
 def main() -> None:
     """Parse CLI args, run the requested models, then print and save results."""
 
-    args = build_argparser().parse_args()
+    args = build_argparser().parse_args() 
     config = load_config(Path(args.config))
     model_specs = build_model_specs(config)
 

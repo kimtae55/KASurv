@@ -17,5 +17,5 @@
     "pmc_llama": "axiong/PMC_LLaMA_13B"
   },
   "max_new_tokens": 256,
-  "output_json": "results/llm_apoe4.json"
+  "output_json": "results/adni_responses.json"
 }

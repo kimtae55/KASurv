@@ -32,5 +32,5 @@ export HF_TOKEN=\${HF_TOKEN:-}
 export VLLM_CACHE_ROOT=${SCRATCH_ROOT}/vllm_cache
 export TOKENIZERS_PARALLELISM=false
 cd '${REPO_DIR}'
-python -u src/llm.py --output-json results/llm_apoe4_\${SLURM_JOB_ID}.json
+python -u src/llm.py --list-models
 "
