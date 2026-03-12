@@ -47,8 +47,8 @@ class ModelResult:
     model_key: str
     feature: str
     outcome: str
-    importance_probability: Optional[float]
-    reasoning: str
+    confidence: Optional[float]
+    answer: str
     raw_response: str
     error: Optional[str] = None
 
@@ -70,7 +70,8 @@ def build_question(feature: str, outcome: str) -> str:
     """Build the natural-language claim that the model should assess."""
 
     return (
-        f"In a survival analysis setting, how important is {feature} as a prognostic or diagnostic factor for {outcome}, and why?"
+        f"In a survival analysis setting, is {feature} associated with increased risk, earlier onset, faster progression, "
+        f"or poorer prognosis for {outcome}?"
     )
 
 
@@ -94,24 +95,23 @@ def build_prompt(feature: str, outcome: str) -> str:
         "\n"
         "Output requirements:\n"
         "1. Return exactly one valid JSON object.\n"
-        '2. The JSON object must contain exactly these keys: "reasoning" and "importance_probability".\n'
-        '3. First determine the reasoning, then set "importance_probability" so it is consistent with that reasoning.\n'
-        f'4. "reasoning" must be 1 to 2 sentences, must explicitly mention "{feature}", and must answer this question: "{question}".\n'
-        f'5. "importance_probability" must be a single number representing how strongly current biomedical knowledge supports this question: "{question}". Use 0 for no meaningful support and 1 for very strong support. If the reasoning is that there is no meaningful literature or evidence on this question, return -1.\n'
-        "6. Base the reasoning on biomedical findings, clinical relevance, or prognostic/diagnostic relevance.\n"
+        '2. The JSON object must contain exactly these keys: "answer" and "confidence".\n'
+        '3. First determine whether the answer is yes, no, or unknown, then set "confidence" so it is consistent with that answer.\n'
+        f'4. "answer" must be 1 to 2 sentences and must follow this style: "Yes, {feature} is known to predict {outcome}, because ...", "No, {feature} is not known to predict {outcome}, because ...", or "Unknown, current evidence is insufficient to determine whether {feature} predicts {outcome}, because ...". Do not repeat the question verbatim.\n'
+        '5. "confidence" must be a single number in [-1, 1] representing the answer on a signed confidence scale. Use values near 1 if the answer is yes, values near -1 if the answer is no, and values near 0 if the answer is unknown or the evidence is unclear.\n'
+        "6. Answer and confidence must be correctly reflect true facts from biomedical findings, clinical relevance, or prognostic/diagnostic relevance.\n"
         "7. Do not justify importance by saying the feature is common in articles, frequently mentioned, or widely studied.\n"
+        '8. Double check the alignment between "answer" and "confidence".'
         "\n"
         "JSON Output:"
     )
 
 
-def first_sentence(text: str) -> str:
-    """Trim free-form text down to one sentence for the reasoning field."""
+def normalize_answer(text: str) -> str:
+    """Normalize whitespace in the answer field without rewriting content."""
 
     text = " ".join(text.strip().split())
-    if not text:
-        return ""
-    return re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0].strip()
+    return text
 
 
 def strip_response_prefix(text: str) -> str:
@@ -123,22 +123,20 @@ def strip_response_prefix(text: str) -> str:
     return text.strip()
 
 
-def normalize_probability(value) -> Optional[float]:
-    """Parse a numeric score and clamp it to the allowed range, with -1 as a sentinel."""
+def normalize_confidence(value) -> Optional[float]:
+    """Parse a numeric confidence score and clamp it to the [-1, 1] range."""
 
     try:
-        prob = float(str(value).replace("%", "").strip())
+        score = float(str(value).replace("%", "").strip())
     except (TypeError, ValueError):
         return None
-    if prob == -1.0:
-        return -1.0
-    if prob > 1.0:
-        prob /= 100.0
-    return max(0.0, min(1.0, prob))
+    if abs(score) > 1.0:
+        score /= 100.0
+    return max(-1.0, min(1.0, score))
 
 
 def parse_llm_json(text: str) -> tuple[Optional[float], str]:
-    """Extract a probability and one-sentence rationale from model output."""
+    """Extract a confidence score and answer text from model output."""
 
     clean_text = strip_response_prefix(text)
     match = re.search(r"(\{.*?\})", clean_text, flags=re.DOTALL)
@@ -146,21 +144,21 @@ def parse_llm_json(text: str) -> tuple[Optional[float], str]:
         try:
             payload = json.loads(match.group(1))
             return (
-                normalize_probability(payload.get("importance_probability")),
-                first_sentence(str(payload.get("reasoning", ""))),
+                normalize_confidence(payload.get("confidence")),
+                normalize_answer(str(payload.get("answer", ""))),
             )
         except json.JSONDecodeError:
             pass
 
-    prob_match = re.search(
-        r'"importance_probability"\s*:\s*([0-9]*\.?[0-9]+)|\bprobability\b\s*[:=]?\s*([0-9]*\.?[0-9]+)',
+    score_match = re.search(
+        r'"confidence"\s*:\s*(-?[0-9]*\.?[0-9]+)|\bconfidence\b\s*[:=]?\s*(-?[0-9]*\.?[0-9]+)',
         clean_text,
         flags=re.IGNORECASE,
     )
-    prob = None
-    if prob_match:
-        prob = normalize_probability(prob_match.group(1) or prob_match.group(2))
-    return prob, first_sentence(clean_text)
+    score = None
+    if score_match:
+        score = normalize_confidence(score_match.group(1) or score_match.group(2))
+    return score, normalize_answer(clean_text)
 
 
 def load_config(config_path: Path) -> RunConfig:
@@ -227,14 +225,14 @@ def infer_hf_causal_lm(loaded_model: LoadedModel, dataset: str, feature: str, ou
     prompt_len = model_inputs["input_ids"].shape[1]
     generated_only = generated[:, prompt_len:]
     output_text = loaded_model.tokenizer.batch_decode(generated_only, skip_special_tokens=True)[0]
-    score, reasoning = parse_llm_json(output_text)
+    score, answer = parse_llm_json(output_text)
     return ModelResult(
         dataset=dataset,
         model_key=loaded_model.model_key,
         feature=feature,
         outcome=outcome,
-        importance_probability=score,
-        reasoning=reasoning or "No reasoning returned.",
+        confidence=score,
+        answer=answer or "No answer returned.",
         raw_response=output_text,
     )
 
@@ -283,8 +281,8 @@ def load_models(config: RunConfig, model_specs: Dict[str, ModelSpec]) -> tuple[D
                     model_key=model_key,
                     feature="",
                     outcome=config.outcome,
-                    importance_probability=None,
-                    reasoning="",
+                    confidence=None,
+                    answer="",
                     raw_response="",
                     error=f"unsupported model key: {model_key}",
                 )
@@ -301,8 +299,8 @@ def load_models(config: RunConfig, model_specs: Dict[str, ModelSpec]) -> tuple[D
                     model_key=model_key,
                     feature="",
                     outcome=config.outcome,
-                    importance_probability=None,
-                    reasoning="",
+                    confidence=None,
+                    answer="",
                     raw_response="",
                     error=str(exc),
                 )
@@ -334,8 +332,8 @@ def run_models(config: RunConfig, loaded_models: Dict[str, LoadedModel], load_er
                         model_key=model_key,
                         feature=feature,
                         outcome=config.outcome,
-                        importance_probability=None,
-                        reasoning="",
+                        confidence=None,
+                        answer="",
                         raw_response="",
                         error=str(exc),
                     )
